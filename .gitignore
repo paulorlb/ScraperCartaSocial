@@ -1,0 +1,19 @@
+# Keep local source data, contact details, caches, and outputs out of Git.
+/data/
+
+# Machine configuration, credentials, and archived reference material.
+/config.toml
+/archive/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.pytest_tmp/
+.env
+.env.*
+!.env.example
+.venv/
+env/
+.DS_Store
+Thumbs.db
+*.tmp

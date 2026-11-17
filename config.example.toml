@@ -1,0 +1,14 @@
+# Copy to config.toml and set an external data folder for this machine.
+# Forward slashes work on Windows. Relative roots resolve from this file.
+[paths]
+data_root = "../ScraperCartaSocial_data"
+
+# Data paths resolve relative to data_root. Empty optional paths disable inputs.
+[inputs]
+services = "raw/df_CartaSocial_equipments.csv"
+equipment_urls = "raw/df_CartaSocial_equipments_urls.csv"
+url_text = ""
+coordinate_cache = ""
+selection_workbook = ""
+service_sheet = "Services"
+address_sheet = "Equipment addresses"

@@ -1,0 +1,24 @@
+name: carta-social
+
+channels:
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  - python=3.12
+  - pandas>=2.2,<4
+  - geopandas>=1,<2
+  - geopy>=2.4,<3
+  - requests>=2.32,<3
+  - python-dotenv>=1,<2
+  - beautifulsoup4>=4.12,<5
+  - lxml
+  - jupyterlab
+  - ipykernel
+  - nbformat
+  - nbclient
+  - matplotlib
+  - openpyxl
+  - pyarrow
+  - tqdm
+  - pytest
