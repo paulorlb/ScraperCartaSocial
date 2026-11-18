@@ -49,9 +49,10 @@ mapping requires an absolute Carta Social URL with exactly one positive
 equipment ID. Existing IDs are validated against the embedded parameter.
 Malformed, ambiguous, or conflicting mappings raise errors.
 
-The structured URL index remains separate from service records. New collection
+The structured URL index remains separate from service records. Collection
 snapshots preserve the actual request URL, including equipment without listed
-services. Both CSV exports can be rebuilt from those snapshots.
+services. Both CSV exports can be rebuilt from a chosen snapshot, either from
+the stored JSON or by re-parsing the stored HTML with the current parser.
 
 ## Geocoding
 
@@ -90,8 +91,10 @@ location quality before drawing territorial conclusions.
 
 ## Request management
 
-Collection uses bounded retries, a configurable request delay, and per-ID
-snapshots. Existing results are reused, while failed requests can be retried.
+Collection uses bounded retries and a configurable request delay. Each run
+writes to its own versioned snapshot, so repeated collections remain
+comparable rather than overwriting one another. Within a snapshot, existing
+results are reused and failed requests can be retried by resuming it.
 Explicit source unavailability is distinguished from unexpected pages.
 
 Geocoding has a request budget and incremental caching. Credentials are

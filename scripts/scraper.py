@@ -1,7 +1,8 @@
 """Extract Carta Social records at the equipment and social-service level.
 
 HTML selectors target the portal detail layout and may need revision when
-the portal changes. Importing this module does not make network requests.
+the portal changes. Each collection writes into its own snapshot folder
+(see scripts/snapshots.py). Importing this module does not make network requests.
 """
 
 import json
@@ -15,7 +16,8 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .utils import INTERIM, RAW, write_json
+from .snapshots import RESUMABLE_STATUSES, SNAPSHOT_SUBDIRS, export_dir_for, read_manifest, update_manifest
+from .utils import write_json
 from .source_urls import add_equipment_ids
 
 BASE_URL = "https://www.cartasocial.pt/resultados-da-pesquisa"
@@ -128,67 +130,135 @@ def flatten_entry(entry):
     return records
 
 
-def export_records(raw_dir=RAW / "scraping"):
-    """Rebuild service records and a separate ID/URL index from JSON snapshots.
+def _equipment_paths(folder, suffix):
+    """Return (id, path) pairs for equipment_<id>.<suffix> files, sorted by ID."""
+    paths = []
+    for path in Path(folder).glob(f"equipment_*.{suffix}"):
+        identifier = path.stem.removeprefix("equipment_")
+        if identifier.isdigit():
+            paths.append((int(identifier), path))
+    return sorted(paths)
+
+
+def export_records(snapshot_dir, output_dir=None, source="json"):
+    """Rebuild service records and a separate ID/URL index from one snapshot.
 
     Args:
-        raw_dir: Directory containing snapshots and both output CSV files.
+        snapshot_dir: Snapshot folder containing json/ and html/ subfolders.
+        output_dir: Destination for the CSV files; defaults to
+            interim/scraping/<snapshot_id>/.
+        source: "json" reads the parsed snapshots stored at collection time.
+            "html" re-parses the stored pages with the current parser, without
+            modifying the snapshot (useful after revising HTML selectors).
 
     Returns:
         pandas.DataFrame: Service records with original source labels. Also writes
             equipment_urls.csv with equipment_id and url, including equipment
-            without service rows. The service CSV does not contain URL columns.
+            without service rows, and build.json describing the rebuild. The
+            service CSV does not contain URL columns.
+
+    Raises:
+        ValueError: Unknown source, or conflicting URLs for one equipment ID.
     """
-    raw_dir = Path(raw_dir)
-    records = []
-    url_records = []
-    for path in sorted(raw_dir.glob("equipment_*.json")):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        records.extend(flatten_entry(payload["data"]))
-        url_records.append({"equipment_id": payload["data"]["equipment_id"], "url": payload["url"]})
+    if source not in ("json", "html"):
+        raise ValueError("source must be 'json' or 'html'.")
+    snapshot_dir = Path(snapshot_dir)
+    output_dir = Path(output_dir) if output_dir is not None else export_dir_for(snapshot_dir)
+    records, url_records, parse_errors, no_data = [], [], [], []
+    if source == "json":
+        for _, path in _equipment_paths(snapshot_dir / "json", "json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            records.extend(flatten_entry(payload["data"]))
+            url_records.append({"equipment_id": payload["data"]["equipment_id"], "url": payload["url"]})
+    else:
+        for equipment_id, path in _equipment_paths(snapshot_dir / "html", "html"):
+            try:
+                data = parse_equipment_html(path.read_text(encoding="utf-8"), equipment_id)
+            except ValueError:
+                parse_errors.append(equipment_id)
+                continue
+            if data is None:
+                no_data.append(equipment_id)
+                continue
+            records.extend(flatten_entry(data))
+            url_records.append({"equipment_id": equipment_id, "url": equipment_url(equipment_id)})
     columns = ["Equipment ID"] + SERVICE_COLUMNS
     result = pd.DataFrame(records) if records else pd.DataFrame(columns=columns)
     url_index = add_equipment_ids(pd.DataFrame(url_records, columns=["equipment_id", "url"]))
     url_index = url_index.drop_duplicates()
     if url_index["equipment_id"].duplicated().any():
         raise ValueError("Snapshots contain conflicting URLs for one equipment ID.")
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    temporary = raw_dir / "equipments.csv.tmp"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary = output_dir / "equipments.csv.tmp"
     result.to_csv(temporary, index=False, encoding="utf-8")
-    temporary.replace(raw_dir / "equipments.csv")
-    temporary_urls = raw_dir / "equipment_urls.csv.tmp"
+    temporary.replace(output_dir / "equipments.csv")
+    temporary_urls = output_dir / "equipment_urls.csv.tmp"
     url_index.to_csv(temporary_urls, index=False, encoding="utf-8")
-    temporary_urls.replace(raw_dir / "equipment_urls.csv")
+    temporary_urls.replace(output_dir / "equipment_urls.csv")
+    write_json({"snapshot_id": snapshot_dir.name, "source": source,
+                "built_at": datetime.now(timezone.utc).isoformat(),
+                "service_rows": len(result), "equipment": len(url_index),
+                "no_data_ids": no_data, "parse_error_ids": parse_errors},
+               output_dir / "build.json")
     return result
 
 
-def run_scraper(start_id, end_id, raw_dir=RAW / "scraping",
-                state_dir=INTERIM / "scraper", sleep_interval=5, timeout=30,
-                user_agent="CartaSocialPipeline/1.0"):
-    """Collect an inclusive ID range, resuming records and retrying failures.
+def _state_counts(state_dir):
+    """Count per-ID request states recorded in a snapshot."""
+    counts = {"ok": 0, "no_data": 0, "error": 0}
+    for _, path in _equipment_paths(state_dir, "json"):
+        status = json.loads(path.read_text(encoding="utf-8"))["status"]
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def run_scraper(start_id, end_id, snapshot_dir, sleep_interval=5, timeout=30,
+                user_agent="CartaSocialPipeline/1.0", output_dir=None):
+    """Collect an inclusive ID range into one snapshot, then export its CSVs.
 
     Args:
         start_id: First positive equipment identifier to request.
         end_id: Last equipment identifier, included in the range.
-        raw_dir: Directory for HTML pages and JSON snapshots.
-        state_dir: Directory for per-ID states: ok, no_data, or error.
+        snapshot_dir: Folder from scripts.snapshots.create_snapshot, or an
+            unfinished snapshot to resume. Pages go to html/, parsed records
+            to json/, and per-ID states (ok, no_data, error) to state/.
         sleep_interval: Pause after each requested equipment, in seconds.
         timeout: Maximum request wait, in seconds.
         user_agent: HTTP application identifier, optionally supplied from .env.
+        output_dir: CSV destination passed to export_records.
 
     Returns:
-        pandas.DataFrame: All service records stored in raw_dir.
+        pandas.DataFrame: All service records stored in the snapshot.
+
+    Raises:
+        ValueError: Invalid parameters, a complete snapshot, or a resume with
+            an ID range different from the one recorded in the snapshot.
 
     Notes:
-        Failures are recorded and retried on the next execution. Snapshot and state directories identify the collection being resumed.
+        Within a snapshot, stored records and no_data IDs are skipped and
+        failures are retried on the next execution. The manifest status becomes
+        "complete" when no errors remain, otherwise "partial". An interrupted
+        run stays "in_progress". Other snapshots are never read or modified.
     """
     if start_id < 1 or end_id < start_id or sleep_interval < 0 or timeout <= 0:
         raise ValueError("Invalid ID range, pause, or timeout.")
-    raw_dir, state_dir = Path(raw_dir), Path(state_dir)
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir = Path(snapshot_dir)
+    manifest = read_manifest(snapshot_dir)
+    if manifest["status"] not in RESUMABLE_STATUSES:
+        raise ValueError(f"Snapshot {snapshot_dir.name} is {manifest['status']}; create a new snapshot.")
+    recorded = manifest.get("parameters", {})
+    if recorded and (recorded["first_id"], recorded["last_id"]) != (start_id, end_id):
+        raise ValueError(f"Snapshot {snapshot_dir.name} covers IDs {recorded['first_id']}-"
+                         f"{recorded['last_id']}; resume it with the same range.")
+    update_manifest(snapshot_dir, status="in_progress", parameters={
+        "first_id": start_id, "last_id": end_id, "request_delay_seconds": sleep_interval,
+        "timeout": timeout, "user_agent": user_agent})
+    html_dir, json_dir, state_dir = (snapshot_dir / name for name in SNAPSHOT_SUBDIRS)
+    for folder in (html_dir, json_dir, state_dir):
+        folder.mkdir(parents=True, exist_ok=True)
     with build_session(user_agent=user_agent) as session:
         for equipment_id in range(start_id, end_id + 1):
-            snapshot = raw_dir / f"equipment_{equipment_id}.json"
+            snapshot = json_dir / f"equipment_{equipment_id}.json"
             state = state_dir / f"equipment_{equipment_id}.json"
             if snapshot.exists():
                 continue
@@ -201,7 +271,7 @@ def run_scraper(start_id, end_id, raw_dir=RAW / "scraping",
             try:
                 response = session.get(url, timeout=timeout)
                 response.raise_for_status()
-                (raw_dir / f"equipment_{equipment_id}.html").write_text(response.text, encoding="utf-8")
+                (html_dir / f"equipment_{equipment_id}.html").write_text(response.text, encoding="utf-8")
                 data = parse_equipment_html(response.text, equipment_id)
                 status = "no_data" if data is None else "ok"
                 if data is not None:
@@ -213,4 +283,8 @@ def run_scraper(start_id, end_id, raw_dir=RAW / "scraping",
                         "timestamp": datetime.now(timezone.utc).isoformat()}, state)
             print(f"ID {equipment_id}: {status}")
             sleep(sleep_interval)
-    return export_records(raw_dir)
+    counts = _state_counts(state_dir)
+    update_manifest(snapshot_dir, counts=counts,
+                    status="partial" if counts.get("error") else "complete",
+                    finished_at=datetime.now(timezone.utc).isoformat())
+    return export_records(snapshot_dir, output_dir=output_dir)

@@ -51,11 +51,13 @@ Geocoding adds lat, lon, raw_addr, provider, status, and precision.
 
 | Relative path | Contents |
 | --- | --- |
-| raw/scraping/equipment_ID.html | Collected page snapshot |
-| raw/scraping/equipment_ID.json | Parsed equipment data, source URL, and UTC retrieval timestamp |
-| raw/scraping/equipments.csv | Service records rebuilt from snapshots |
-| raw/scraping/equipment_urls.csv | Equipment ID/URL mappings rebuilt from snapshots |
-| interim/scraper/ | Per-equipment request state |
+| raw/scraping/snapshots/SNAPSHOT/manifest.json | Snapshot status (in_progress, partial, complete), ID range, request settings, and ok/no_data/error counts |
+| raw/scraping/snapshots/SNAPSHOT/html/equipment_ID.html | Collected page |
+| raw/scraping/snapshots/SNAPSHOT/json/equipment_ID.json | Parsed equipment data, source URL, and UTC retrieval timestamp |
+| raw/scraping/snapshots/SNAPSHOT/state/equipment_ID.json | Per-equipment request state |
+| interim/scraping/SNAPSHOT/equipments.csv | Service records rebuilt from one snapshot |
+| interim/scraping/SNAPSHOT/equipment_urls.csv | Equipment ID/URL mappings rebuilt from one snapshot |
+| interim/scraping/SNAPSHOT/build.json | Rebuild source (json or html), time, counts, and unparsable IDs |
 | interim/services_clean.csv | Full cleaned input table |
 | interim/services_selected.csv | Configured service subset used by subsequent steps |
 | interim/equipment_coordinates.csv | One coordinate result per selected equipment, including unresolved cases |
@@ -63,6 +65,10 @@ Geocoding adds lat, lon, raw_addr, provider, status, and precision.
 | processed/carta_social_services.csv | All selected service records, including those without coordinates |
 | processed/carta_social_service_locations.gpkg | Valid point features in service_locations, EPSG:4326 |
 | processed/carta_social_dataset_metadata.json | Actual service categories, record counts, facility counts, and spatial coverage |
+
+SNAPSHOT is a UTC identifier such as 20261118T151700Z, optionally followed by
+a label. A snapshot is written only by its own collection and resume runs;
+snapshot tables can be rebuilt at any time without modifying it.
 
 Interim contains only outputs of the active workflow. A service record with
 no usable coordinates remains in the complete CSV and is excluded from the
